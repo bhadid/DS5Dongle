@@ -17,6 +17,7 @@
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/cyw43_arch.h"
+#include "pico/multicore.h"
 #include "state_mgr.h"
 #if ENABLE_SERIAL
 #include "pico/stdio_usb.h"
@@ -63,7 +64,6 @@ void __not_in_flash_func(interrupt_loop)() {
     bool should_send = false;
     // Local buffer to hold the report data while we prepare it to send. 
     uint8_t safe_report[63];
-
 
     critical_section_enter_blocking(&report_cs);
     if (report_dirty) {
@@ -257,6 +257,9 @@ int main() {
 #endif
 
     board_init();
+    // Before tusb_init(): the configuration descriptor's bInterval comes from polling_rate_mode,
+    // and serial builds enumerate as soon as tud_task() runs.
+    config_load();
     tusb_rhport_init_t dev_init = {
         .role = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_FULL
@@ -269,6 +272,16 @@ int main() {
     board_init_after_tusb();
 #if ENABLE_SERIAL
     stdio_usb_init();
+#endif
+
+    // Start core1 before cyw43_arch_init(): that sets up BTstack's TLV link key store,
+    // and with PICO_FLASH_ASSUME_CORE1_SAFE=0 every flash_safe_execute() fails with
+    // NOT_PERMITTED until core1 has registered as a lockout victim. The store's bank
+    // header then never got written, so each boot rewrote keys at offset 8 on top of
+    // the old ones and deletes found nothing. core1_entry reads the config (loaded above).
+    audio_init();
+#if !DISABLE_SPEAKER_PROC
+    while (!multicore_lockout_victim_is_initialized(1)) tight_loop_contents();
 #endif
 
     if (cyw43_arch_init()) {
@@ -302,12 +315,9 @@ int main() {
     critical_section_init(&report_cs);
     wake_init();
 
-    config_load();
-
     bt_init();
     bt_register_data_callback(on_bt_data);
 
-    audio_init();
     state_init();
 
 #if !ENABLE_SERIAL
