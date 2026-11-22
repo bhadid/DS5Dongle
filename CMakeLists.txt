@@ -98,6 +98,14 @@ include(pico_sdk_import.cmake)
 
 project(ds5-bridge C CXX ASM)
 
+# __FILE__ and asserts would otherwise embed the builder's local paths (and user name)
+# in the firmware. The last matching map wins, so the most specific goes last.
+add_compile_options(
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=ds5dongle"
+        "-ffile-prefix-map=${PICO_SDK_PATH}=pico-sdk"
+        "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build"
+)
+
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
