@@ -19,6 +19,10 @@
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
 #include "state_mgr.h"
+#ifdef DIAG_LOG
+#include "hci_dump.h"
+#include "hci_dump_embedded_stdout.h"
+#endif
 #if ENABLE_SERIAL
 #include "pico/stdio_usb.h"
 #endif
@@ -65,6 +69,7 @@ void __not_in_flash_func(interrupt_loop)() {
     // Local buffer to hold the report data while we prepare it to send. 
     uint8_t safe_report[63];
 
+
     critical_section_enter_blocking(&report_cs);
     if (report_dirty) {
         memcpy(safe_report, interrupt_in_data, 63);
@@ -87,6 +92,54 @@ void __not_in_flash_func(interrupt_loop)() {
     }
 }
 
+#ifdef DIAG_LOG
+static uint32_t diag_input_count = 0;
+extern uint32_t diag_bt_write_count[256];
+// BT input gap summary per 10 s window: the 4 s stall shows as gaps > 20 ms
+static uint32_t diag_gaps_long = 0, diag_gaps_mid = 0, diag_gap_max_us = 0;
+
+// Serial console: one letter plus optional digits, e.g. "a0" (see diag_radio_command).
+static void diag_console() {
+    static char cmd = 0;
+    static int arg = 0;
+    int c;
+    while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
+        if (c >= '0' && c <= '9' && cmd) {
+            arg = arg * 10 + (c - '0');
+        } else if (c == '\r' || c == '\n') {
+            if (cmd) diag_radio_command(cmd, arg);
+            cmd = 0;
+            arg = 0;
+        } else if (c > ' ') {
+            cmd = (char) c;
+            arg = 0;
+        }
+    }
+}
+
+// Once a second: input reports received, and packets sent to the controller by report ID.
+static void diag_tick() {
+    static uint64_t next_us = 0, next_summary_us = 0;
+    const uint64_t now_us = time_us_64();
+    diag_console();
+    if (now_us >= next_summary_us) {
+        if (next_summary_us) {
+            printf("[DIAG] %lu ms 10s: gaps >20ms %lu, 10-20ms %lu, max %lu us\n", (unsigned long) (now_us / 1000),
+                   (unsigned long) diag_gaps_long, (unsigned long) diag_gaps_mid, (unsigned long) diag_gap_max_us);
+        }
+        diag_gaps_long = diag_gaps_mid = diag_gap_max_us = 0;
+        next_summary_us = now_us + 10 * 1000 * 1000;
+    }
+    if (now_us < next_us) return;
+    next_us = now_us + 1000 * 1000;
+    printf("[DIAG] %lu ms 1s: in %lu, out 0x31 %lu, 0x32 %lu, 0x36 %lu\n", (unsigned long) (now_us / 1000),
+           (unsigned long) diag_input_count, (unsigned long) diag_bt_write_count[0x31],
+           (unsigned long) diag_bt_write_count[0x32], (unsigned long) diag_bt_write_count[0x36]);
+    diag_input_count = 0;
+    diag_bt_write_count[0x31] = diag_bt_write_count[0x32] = diag_bt_write_count[0x36] = 0;
+}
+#endif
+
 void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
     // printf("[Main] BT data callback: channel=%u len=%u\n", channel, len);
     if (channel == INTERRUPT && len > 2 && data[1] == 0x31) {
@@ -98,6 +151,21 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
             }
             return;
         }
+#ifdef DIAG_LOG
+        {
+            static uint64_t last_us = 0;
+            const uint64_t now_us = time_us_64();
+            diag_input_count++;
+            if (last_us && now_us - last_us > 8000) {
+                const uint32_t gap = (uint32_t) (now_us - last_us);
+                printf("[DIAG] %lu ms BT input gap %lu us\n", (unsigned long) (now_us / 1000), (unsigned long) gap);
+                if (gap > 20000) diag_gaps_long++;
+                else if (gap > 10000) diag_gaps_mid++;
+                if (gap > diag_gap_max_us) diag_gap_max_us = gap;
+            }
+            last_us = now_us;
+        }
+#endif
         if ((data[56] & 1) != (interrupt_in_data[53] & 1)) {
             set_headset(data[56] & 1);
         }
@@ -274,6 +342,17 @@ int main() {
     stdio_usb_init();
 #endif
 
+#ifdef DIAG_LOG
+    // Hold boot until the serial logger attaches (max 20 s) so TLV init and pairing logs aren't lost
+    for (uint32_t t0 = to_ms_since_boot(get_absolute_time());
+         !stdio_usb_connected() && to_ms_since_boot(get_absolute_time()) - t0 < 20000;) {
+        tud_task();
+    }
+    printf("[DIAG] %lu ms serial attached, starting BT\n", (unsigned long) (time_us_64() / 1000));
+    hci_dump_init(hci_dump_embedded_stdout_get_instance());
+    hci_dump_enable_packet_log(false);
+#endif
+
     // Start core1 before cyw43_arch_init(): that sets up BTstack's TLV link key store,
     // and with PICO_FLASH_ASSUME_CORE1_SAFE=0 every flash_safe_execute() fails with
     // NOT_PERMITTED until core1 has registered as a lockout victim. The store's bank
@@ -325,19 +404,46 @@ int main() {
 #endif
 
     while (1) {
+#ifdef DIAG_LOG
+        // Per-step timestamps; a loop iteration over 15 ms is printed with its breakdown
+        uint32_t ts[9];
+        ts[0] = time_us_32();
+#define DIAG_STEP(i) ts[i] = time_us_32()
+#else
+#define DIAG_STEP(i)
+#endif
 #if !ENABLE_SERIAL
         watchdog_update();
 #endif
         cyw43_arch_poll();
+        DIAG_STEP(1);
         tud_task();
+        DIAG_STEP(2);
         wake_task();
         audio_loop();
+        DIAG_STEP(3);
         interrupt_loop();
+        DIAG_STEP(4);
 #if ENABLE_BATT_LED
         battery_led_tick();
 #endif
         button_check();
+        DIAG_STEP(5);
         bt_inquiring_led();
+        DIAG_STEP(6);
         dse_task();
+        DIAG_STEP(7);
+#ifdef DIAG_LOG
+        diag_tick();
+        ts[8] = time_us_32();
+        if (ts[8] - ts[0] > 15000) {
+            printf("[DIAG] %lu ms loop stall %lu us: cyw43 %lu, tud %lu, audio %lu, hid %lu, button %lu, led %lu, dse %lu\n",
+                   (unsigned long) (time_us_64() / 1000), (unsigned long) (ts[8] - ts[0]),
+                   (unsigned long) (ts[1] - ts[0]), (unsigned long) (ts[2] - ts[1]), (unsigned long) (ts[3] - ts[2]),
+                   (unsigned long) (ts[4] - ts[3]), (unsigned long) (ts[5] - ts[4]), (unsigned long) (ts[6] - ts[5]),
+                   (unsigned long) (ts[7] - ts[6]));
+        }
+#endif
+#undef DIAG_STEP
     }
 }

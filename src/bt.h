@@ -36,5 +36,9 @@ void bt_inquiring_led();
 void bt_bootsel_click_action();
 void bt_bootsel_hold_action();
 void bt_blacklist_persist_if_dirty();
+#ifdef DIAG_LOG
+// Serial-console radio experiments for the 4 s stall (see diag_radio_command in bt.cpp).
+void diag_radio_command(char cmd, int arg);
+#endif
 
 #endif //DS5_BRIDGE_BT_H

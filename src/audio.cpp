@@ -15,6 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#ifdef DIAG_LOG
+#include <malloc.h>
+#endif
 #include "opus.h"
 #include "utils.h"
 #include "pico/multicore.h"
@@ -331,6 +334,17 @@ void __not_in_flash_func(core1_entry)() {
     // floats QSPI CSn) - the latter makes polling BOOTSEL safe while audio streams on
     // core1. Requires PICO_FLASH_ASSUME_CORE1_SAFE=0.
     flash_safe_execute_core_init();
+#ifdef DIAG_LOG
+    {
+        extern char end, __HeapLimit;
+        struct mallinfo mi = mallinfo();
+        printf("[DIAG] core1: heap %u, used %u, encoder needs %d, decoder needs %d\n",
+               (unsigned) (&__HeapLimit - &end), (unsigned) mi.uordblks,
+               opus_encoder_get_size(2), opus_decoder_get_size(MIC_CHANNELS));
+        printf("[DIAG] core1: disable_speaker %u, disable_mic %u\n",
+               get_config().disable_speaker, get_config().disable_mic);
+    }
+#endif
     int error = 0;
     // Encoder + decoder + resampler nearly fill the heap, and an out-of-memory panic here
     // leaves core1 dead, and every flash_safe_execute() after that times out (BOOTSEL never
@@ -352,6 +366,10 @@ void __not_in_flash_func(core1_entry)() {
             resampler_audio.SetFeedMode(true);
             resampler_audio.Prealloc(2, 512, 480);
         }
+#ifdef DIAG_LOG
+        printf("[DIAG] core1: speaker path %s, heap used %u\n", encoder ? "ok" : "FAILED",
+               (unsigned) mallinfo().uordblks);
+#endif
     }
     if (!get_config().disable_mic) {
         decoder = opus_decoder_create(48000, MIC_CHANNELS, &error);
@@ -360,6 +378,9 @@ void __not_in_flash_func(core1_entry)() {
             decoder = nullptr;
         }
     }
+#ifdef DIAG_LOG
+    printf("[DIAG] core1: audio init done, heap used %u\n", (unsigned) mallinfo().uordblks);
+#endif
 
     while (true) {
         speaker_proc();

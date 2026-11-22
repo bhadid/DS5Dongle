@@ -313,6 +313,11 @@ target_sources(ds5-bridge PRIVATE
         src/ps_shortcut.cpp
 )
 
+option(DIAG_LOG "Log HCI events and BT input gaps over serial (spike investigation)" OFF)
+if(DIAG_LOG)
+    target_compile_definitions(ds5-bridge PRIVATE DIAG_LOG)
+endif()
+
 option(WAKE_DEBUG "Print wake-FSM transitions to UART (developer use)" OFF)
 if(WAKE_DEBUG)
     target_compile_definitions(ds5-bridge PRIVATE

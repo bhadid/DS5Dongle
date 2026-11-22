@@ -414,6 +414,14 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 
     const uint8_t event_type = hci_event_packet_get_type(packet);
 
+#ifdef DIAG_LOG
+    // Log every HCI event except the per-packet bookkeeping ones, to find what recurs every 4 s.
+    if (event_type != HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS && event_type != HCI_EVENT_TRANSPORT_PACKET_SENT) {
+        printf("[DIAG] %lu ms HCI event 0x%02X len %u:", (unsigned long) (time_us_64() / 1000), event_type, size);
+        for (uint16_t i = 0; i < size && i < 12; i++) printf(" %02X", packet[i]);
+        printf("\n");
+    }
+#endif
 
     switch (event_type) {
         case BTSTACK_EVENT_STATE: {
@@ -888,9 +896,66 @@ void bt_control_send(const uint8_t *data, uint16_t len) {
     }
 }
 
+#ifdef DIAG_LOG
+// Commands not in BTstack's table
+static const hci_cmd_t diag_read_afh_assessment = {0x0C48, ""};
+static const hci_cmd_t diag_read_afh_map = {0x1406, "H"};
+static const hci_cmd_t diag_le_set_adv_enable = {0x200A, "1"};
+static const hci_cmd_t diag_le_set_scan_enable = {0x200C, "11"};
+
+// Set a 32-bit WLAN firmware iovar ("name" = value); returns the ioctl result.
+static int diag_wlan_iovar(const char *name, uint32_t value) {
+    uint8_t buf[32];
+    const size_t n = strlen(name) + 1;
+    memcpy(buf, name, n);
+    buf[n] = value & 0xff;
+    buf[n + 1] = (value >> 8) & 0xff;
+    buf[n + 2] = (value >> 16) & 0xff;
+    buf[n + 3] = (value >> 24) & 0xff;
+    return cyw43_ioctl(&cyw43_state, (263 << 1) | 1, n + 4, buf, CYW43_ITF_STA); // WLC_SET_VAR
+}
+
+// a<0|1>  AFH channel assessment off/on      A  read AFH assessment mode   M  read AFH channel map
+// m       request master role (Pico)         q  role discovery
+// l / L   LE scan off / LE advertising off
+// u / d   WLAN interface up / down           p<0|1|2>  WLAN PM none/default/aggressive
+// c<n>    WLAN iovar btc_mode = n (coex)     v<0|1>    WLAN iovar mpc = n
+void diag_radio_command(char cmd, int arg) {
+    const hci_con_handle_t h = acl_handle;
+    int rc = 0;
+    switch (cmd) {
+        case 'a': rc = hci_send_cmd(&hci_write_afh_channel_assessment_mode, arg ? 1 : 0); break;
+        case 'A': rc = hci_send_cmd(&diag_read_afh_assessment); break;
+        case 'M': rc = h != HCI_CON_HANDLE_INVALID ? hci_send_cmd(&diag_read_afh_map, h) : -1; break;
+        case 'm': rc = hci_send_cmd(&hci_switch_role_command, current_device_addr, 0); break;
+        case 'q': rc = h != HCI_CON_HANDLE_INVALID ? hci_send_cmd(&hci_role_discovery, h) : -1; break;
+        case 'l':
+            rc = hci_send_cmd(&diag_le_set_scan_enable, 0, 0);
+            printf("[DIAG] LE scan off rc=%d (send 'L' for advertising off)\n", rc);
+            return;
+        case 'L': rc = hci_send_cmd(&diag_le_set_adv_enable, 0); break;
+        case 'u': cyw43_wifi_set_up(&cyw43_state, CYW43_ITF_STA, true, CYW43_COUNTRY_WORLDWIDE); break;
+        case 'd': cyw43_wifi_set_up(&cyw43_state, CYW43_ITF_STA, false, CYW43_COUNTRY_WORLDWIDE); break;
+        case 'p':
+            rc = cyw43_wifi_pm(&cyw43_state, arg == 0 ? CYW43_NONE_PM : arg == 1 ? CYW43_DEFAULT_PM : CYW43_AGGRESSIVE_PM);
+            break;
+        case 'c': rc = diag_wlan_iovar("btc_mode", arg); break;
+        case 'v': rc = diag_wlan_iovar("mpc", arg); break;
+        default:
+            printf("[DIAG] unknown command '%c'\n", cmd);
+            return;
+    }
+    printf("[DIAG] %lu ms command '%c' %d -> rc=%d\n", (unsigned long) (time_us_64() / 1000), cmd, arg, rc);
+}
+
+uint32_t diag_bt_write_count[256];
+#endif
 
 void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
     if (hid_interrupt_cid == 0) return;
+#ifdef DIAG_LOG
+    diag_bt_write_count[data[0]]++;
+#endif
     static send_element packet{};
     packet.len = len + 1;
     packet.data[0] = 0xA2;
