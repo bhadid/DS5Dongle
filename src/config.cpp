@@ -13,10 +13,14 @@
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h"
+#include "pico/btstack_flash_bank.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 5; // 如果想要强制重置配置，再更新 CONFIG_VERSION。
-constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+// Sector just below the BTstack TLV banks. Not the last sector: on RP2350 that one is
+// reserved for the E10 workaround and gets written by every UF2 flash, which reset the
+// config on each reflash.
+constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET - FLASH_SECTOR_SIZE;
 static Config config{};
 bool is_dse = false;
 
