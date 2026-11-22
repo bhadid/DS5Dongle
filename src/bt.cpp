@@ -89,6 +89,25 @@ static void bt_reauth_timer_handler(btstack_timer_source_t *ts) {
     bt_reauth_handle = HCI_CON_HANDLE_INVALID;
 }
 
+// Turn off AFH channel assessment in the CYW43 controller. With it on, the radio leaves the
+// link for ~25 ms every 4.0 s to measure the other channels, and the controller's input
+// reports arrive that late (measured: 26 ms extra latency every 4 s, gone with it off).
+// The DualSense is master on PS-reconnect links and runs its own assessment for the hop map.
+static const hci_cmd_t hci_write_afh_channel_assessment_mode = {0x0C49, "1"};
+static btstack_timer_source_t bt_afh_timer;
+static int bt_afh_tries = 0;
+
+static void bt_afh_assessment_off(btstack_timer_source_t *ts) {
+    const uint8_t rc = hci_send_cmd(&hci_write_afh_channel_assessment_mode, 0);
+    if (rc != ERROR_CODE_SUCCESS && ++bt_afh_tries < 20) {
+        // HCI busy with another command; try again shortly
+        btstack_run_loop_set_timer_handler(ts, bt_afh_assessment_off);
+        btstack_run_loop_set_timer(ts, 50);
+        btstack_run_loop_add_timer(ts);
+        return;
+    }
+    printf("[BT] AFH channel assessment off, rc=0x%02X\n", rc);
+}
 static uint16_t hid_control_cid;
 static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
@@ -402,6 +421,8 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             printf("[BT] State: %u\n", state);
             if (state == HCI_STATE_WORKING) {
                 printf("[BT] Stack ready, start inquiry\n");
+                bt_afh_tries = 0;
+                bt_afh_assessment_off(&bt_afh_timer);
                 bt_blacklist_load();
                 gap_inquiry_start(30);
                 bt_inquiring = true;
