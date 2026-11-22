@@ -68,6 +68,27 @@ static int bt_cleared_addrs_count = 0;
 static bool bt_blacklist_dirty = false;
 static uint32_t bt_blacklist_dirty_ms = 0;
 static hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
+// Controller rejected our stored key (it was re-paired elsewhere). Never offer that key
+// again, even if the flash delete didn't take, so the retry falls through to fresh SSP.
+static bd_addr_t bt_rejected_key_addr;
+static bool bt_rejected_key_valid = false;
+// Re-authentication after a rejected key, deferred until HCI accepts a command again.
+static btstack_timer_source_t bt_reauth_timer;
+static hci_con_handle_t bt_reauth_handle = HCI_CON_HANDLE_INVALID;
+static int bt_reauth_tries = 0;
+
+static void bt_reauth_timer_handler(btstack_timer_source_t *ts) {
+    if (bt_reauth_handle == HCI_CON_HANDLE_INVALID) return;
+    const uint8_t rc = hci_send_cmd(&hci_authentication_requested, bt_reauth_handle);
+    printf("[HCI] Retrying authentication without stored key, rc=0x%02X\n", rc);
+    if (rc != ERROR_CODE_SUCCESS && ++bt_reauth_tries < 10) {
+        btstack_run_loop_set_timer(ts, 100);
+        btstack_run_loop_add_timer(ts);
+        return;
+    }
+    bt_reauth_handle = HCI_CON_HANDLE_INVALID;
+}
+
 static uint16_t hid_control_cid;
 static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
@@ -374,6 +395,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 
     const uint8_t event_type = hci_event_packet_get_type(packet);
 
+
     switch (event_type) {
         case BTSTACK_EVENT_STATE: {
             const uint8_t state = btstack_event_state_get_state(packet);
@@ -508,6 +530,10 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             link_key_t link_key;
             link_key_type_t link_key_type;
             bool link = gap_get_link_key_for_bd_addr(addr, link_key, &link_key_type);
+            if (link && bt_rejected_key_valid && bd_addr_cmp(addr, bt_rejected_key_addr) == 0) {
+                printf("[HCI] Stored key for %s was rejected earlier, not offering it\n", bd_addr_to_str(addr));
+                link = false;
+            }
             printf("[HCI] Link key: ");
             for (int i = 0; i < sizeof(link_key_t); i++) {
                 printf("%02X", link_key[i]);
@@ -547,8 +573,27 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             if (status != ERROR_CODE_SUCCESS) {
                 printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(current_device_addr));
                 gap_drop_link_key_for_bd_addr(current_device_addr);
+                {
+                    link_key_t k;
+                    link_key_type_t t;
+                    printf("[HCI] Stored key after drop: %s\n",
+                           gap_get_link_key_for_bd_addr(current_device_addr, k, &t) ? "STILL PRESENT" : "gone");
+                }
+                // Stale key (controller was paired elsewhere): retry on the same connection;
+                // the link key request then gets a negative reply and fresh SSP pairing runs.
+                // Deferred: sent right here HCI refuses it (0x0C, command still pending).
+                if (status == ERROR_CODE_PIN_OR_KEY_MISSING) {
+                    bd_addr_copy(bt_rejected_key_addr, current_device_addr);
+                    bt_rejected_key_valid = true;
+                    bt_reauth_handle = handle;
+                    bt_reauth_tries = 0;
+                    btstack_run_loop_set_timer_handler(&bt_reauth_timer, bt_reauth_timer_handler);
+                    btstack_run_loop_set_timer(&bt_reauth_timer, 100);
+                    btstack_run_loop_add_timer(&bt_reauth_timer);
+                }
                 // gap_inquiry_start(30);
             } else {
+                bt_rejected_key_valid = false;
                 hci_send_cmd(&hci_set_connection_encryption, handle, 1);
             }
             break;
@@ -821,6 +866,7 @@ void bt_control_send(const uint8_t *data, uint16_t len) {
         l2cap_send(hid_control_cid, const_cast<uint8_t *>(data), len);
     }
 }
+
 
 void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
     if (hid_interrupt_cid == 0) return;
