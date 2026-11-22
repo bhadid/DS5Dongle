@@ -280,6 +280,9 @@ target_compile_definitions(ds5-bridge PRIVATE
         # accessed - both config_save() and the BOOTSEL CSn float poll. core1_entry
         # registers via flash_safe_execute_core_init().
         PICO_FLASH_ASSUME_CORE1_SAFE=0
+        # malloc returns NULL instead of panicking: speaker + mic nearly fill
+        # the heap, and a panicked core1 breaks every flash_safe_execute().
+        PICO_MALLOC_PANIC=0
         WDL_RESAMPLE_TYPE=float
         CYW43_PIO_CLOCK_DIV_INT=${CYW43_PIO_CLOCK_DIV_VALUE}
         PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=0

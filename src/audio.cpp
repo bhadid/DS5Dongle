@@ -268,7 +268,7 @@ static void __not_in_flash_func(speaker_proc)() {
     if (!queue_try_remove(&audio_fifo, &audio_element)) {
         return;
     }
-    if (get_config().disable_speaker) {
+    if (get_config().disable_speaker || !encoder) {
         return;
     }
     // 将 512 frames 重采样成 480 frames 以解决噪音问题。感谢 @Junhoo
@@ -303,7 +303,7 @@ static void __not_in_flash_func(mic_proc)() {
     if (!queue_try_remove(&mic_fifo, &mic_packet)) {
         return;
     }
-    if (!mic_active || get_config().disable_mic) {
+    if (!mic_active || get_config().disable_mic || !decoder) {
         return;
     }
     static mic_decode_element decode_element{};
@@ -332,22 +332,33 @@ void __not_in_flash_func(core1_entry)() {
     // core1. Requires PICO_FLASH_ASSUME_CORE1_SAFE=0.
     flash_safe_execute_core_init();
     int error = 0;
-    encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_RESTRICTED_LOWDELAY, &error);
-    if (error != 0) {
-        printf("[Audio] OpusEncoder create failed\n");
-        return;
+    // Encoder + decoder + resampler nearly fill the heap, and an out-of-memory panic here
+    // leaves core1 dead, and every flash_safe_execute() after that times out (BOOTSEL never
+    // reads as pressed, link key deletes never reach flash). Only allocate what's enabled;
+    // toggling disable_speaker / disable_mic takes effect after a reboot.
+    if (!get_config().disable_speaker) {
+        // Don't return on failure: core1 must stay in its loop to answer flash_safe_execute().
+        encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_RESTRICTED_LOWDELAY, &error);
+        if (error != 0) {
+            printf("[Audio] OpusEncoder create failed\n");
+            encoder = nullptr;
+        } else {
+            opus_encoder_ctl(encoder,OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
+            opus_encoder_ctl(encoder,OPUS_SET_BITRATE(200 * 8 * 100));
+            opus_encoder_ctl(encoder,OPUS_SET_VBR(false));
+            opus_encoder_ctl(encoder,OPUS_SET_COMPLEXITY(0)); // max 4
+            resampler_audio.SetMode(true, 0, false);
+            resampler_audio.SetRates(51200, 48000);
+            resampler_audio.SetFeedMode(true);
+            resampler_audio.Prealloc(2, 512, 480);
+        }
     }
-    opus_encoder_ctl(encoder,OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
-    opus_encoder_ctl(encoder,OPUS_SET_BITRATE(200 * 8 * 100));
-    opus_encoder_ctl(encoder,OPUS_SET_VBR(false));
-    opus_encoder_ctl(encoder,OPUS_SET_COMPLEXITY(0)); // max 4
-    resampler_audio.SetMode(true, 0, false);
-    resampler_audio.SetRates(51200, 48000);
-    resampler_audio.SetFeedMode(true);
-    resampler_audio.Prealloc(2, 512, 480);
-    decoder = opus_decoder_create(48000, MIC_CHANNELS, &error);
-    if (error != 0) {
-        printf("[Audio] OpusDecoder create failed\n");
+    if (!get_config().disable_mic) {
+        decoder = opus_decoder_create(48000, MIC_CHANNELS, &error);
+        if (error != 0) {
+            printf("[Audio] OpusDecoder create failed\n");
+            decoder = nullptr;
+        }
     }
 
     while (true) {
