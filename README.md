@@ -1,3 +1,79 @@
+# DS5Dongle low-latency fork
+
+An unofficial fork of [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) **v0.7.2-hotfix**, which turns a
+Raspberry Pi Pico 2 W into a wireless DualSense receiver. All credit for the firmware goes to awalol and contributors.
+This fork only adds fixes for input stalls, pairing and saved settings.
+
+> [!IMPORTANT]
+> Tested on one Pico 2 W, one DualSense and one Windows 11 PC, with speaker and mic off.
+> Other boards, the DualSense Edge and audio streaming are untested.
+> Please report problems with this fork here, not to upstream.
+
+## What's different
+
+| Problem in v0.7.2-hotfix | Fix |
+|---|---|
+| Input stalled about 25 ms every 4 s | Turn off the radio's AFH channel assessment |
+| Pairing keys got corrupted or couldn't be deleted | Start core 1 before Bluetooth |
+| Core 1 could run out of memory and crash | Allocate only enabled audio and survive failures |
+| A rejected pairing key blocked re-pairing | Retry with fresh pairing |
+| Flashing firmware reset the settings | Store them in another flash sector |
+| Saved polling rate was read too late at boot | Load settings before USB starts |
+
+On the test setup, updates went from 695 to 791 per second and the worst extra delay from 28.5 to 13.8 ms.
+These are report arrival timings, not button-to-screen latency.
+
+## Install
+
+1. Download the `.uf2` from [Releases](../../releases).
+2. Hold BOOTSEL while plugging in the Pico 2 W, then copy the file onto the `RP2350` drive.
+3. Hold PS + Create on the controller until the light bar flashes. If it doesn't connect, short-press BOOTSEL.
+   The PC only sees the dongle once a controller is connected.
+4. For the lowest latency, get this branch (clone it, or use Code > Download ZIP), run the commands below in its
+   folder, then replug the Pico. These settings are not part of the `.uf2`.
+
+```sh
+pip install hidapi
+python tools/config_tool.py set polling_rate_mode=2 disable_speaker=1 disable_mic=1
+python tools/config_tool.py get
+```
+
+Use the `config_tool.py` from this branch. Newer upstream tools and the web config may expect another settings
+layout, in which `polling_rate_mode=2` means something else. Coming from stock v0.7.2-hotfix, set your settings
+again once, because their storage location changed.
+
+## Limitations
+
+- **Busy 2.4 GHz band:** when the Pico is in charge of the link (the first connection after pairing), it can't
+  adapt to interference. Reconnecting with PS normally puts the controller in charge.
+- **Audio:** switching speaker or mic on or off needs a replug. With both on, memory is nearly full.
+- **Remaining jitter:** a delay of about 13 ms every 2.56 s remains. It appears to come from the controller.
+- **Pairing security:** if a device with the paired controller's address reports a missing key, the dongle pairs
+  again without confirmation. Someone nearby who can spoof that address could abuse this.
+- **Windows audio:** Windows may pick the DualSense as default audio device. Disable it in Sound settings.
+
+## Build and measure
+
+```sh
+git clone --recurse-submodules -b low-latency https://github.com/bhadid/DS5Dongle.git
+```
+
+On Windows, run `tools\build-windows.ps1` from inside that clone. Run standalone, it builds upstream instead.
+For other systems, see the build instructions below.
+
+- `tools/latency/rate_test.py` measures update rate and gaps.
+- `tools/latency/gap_probe.py` tells lost reports from delayed ones.
+- The [`diagnostics`](../../tree/diagnostics) branch has serial logging for investigating radio problems.
+
+## License
+
+DS5Dongle is [MIT licensed](LICENSE), and so are this fork's changes. Built firmware contains third-party code,
+some of which may only be used on Raspberry Pi chips. See [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+
+---
+
+*The original upstream README follows. Its downloads, web config and feature notes may not match this fork.*
+
 # Pico2W DualSense 5 Bridge
 
 [中文](./README.CN.md)
